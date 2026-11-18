@@ -124,8 +124,10 @@ class BatchConversionWorker(QThread):
 
                     self.progress_updated.emit(idx, total)
 
-        elapsed = time.time() - start_time
-        self.batch_completed.emit(success_count, fail_count, elapsed)
+            # Notify the UI immediately, BEFORE the (potentially slow) Office
+            # shutdown performed when the engine context exits.
+            elapsed = time.time() - start_time
+            self.batch_completed.emit(success_count, fail_count, elapsed)
 
 
 class DropZone(QFrame):
@@ -196,6 +198,8 @@ class OmniConvertApp(QMainWindow):
         self.setMinimumSize(720, 500)
 
         self.worker: Optional[BatchConversionWorker] = None
+        self._all_workers: List[BatchConversionWorker] = []
+        self._converting = False
         self.file_records: Dict[str, str] = {}
         self.custom_output_dir: str = ""
 
@@ -204,6 +208,7 @@ class OmniConvertApp(QMainWindow):
 
     def _init_ui(self):
         central = QWidget()
+        central.setObjectName("Central")
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -260,7 +265,7 @@ class OmniConvertApp(QMainWindow):
         bottom_layout.setContentsMargins(18, 16, 18, 16)
         bottom_layout.setSpacing(14)
 
-        # Settings Row
+        # Row 1: Target format
         settings_row = QHBoxLayout()
         settings_row.setSpacing(12)
 
@@ -269,50 +274,71 @@ class OmniConvertApp(QMainWindow):
         settings_row.addWidget(lbl_to)
 
         self.cmb_target = QComboBox()
-        self.cmb_target.setMinimumWidth(240)
+        self.cmb_target.setMinimumWidth(260)
+        self.cmb_target.setMaxVisibleItems(8)  # scroll instead of covering the screen
+        self.cmb_target.view().setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         for ext, desc in ALL_TARGET_FORMATS:
             self.cmb_target.addItem(f"{ext.upper()}  —  {desc}", ext)
         self.cmb_target.currentIndexChanged.connect(self._on_format_changed)
         settings_row.addWidget(self.cmb_target)
 
+        settings_row.addSpacing(8)
         self.chk_merge = QCheckBox("Combine into one PDF")
         self.chk_merge.setToolTip("Merge all files in the list into a single PDF file")
         settings_row.addWidget(self.chk_merge)
-
         settings_row.addStretch()
-
-        lbl_save = QLabel("Save to:")
-        lbl_save.setObjectName("SubtleLabel")
-        settings_row.addWidget(lbl_save)
-
-        self.lbl_output_path = QLabel("Same folder as original files")
-        self.lbl_output_path.setObjectName("FolderBadge")
-        settings_row.addWidget(self.lbl_output_path)
-
-        btn_change_folder = QPushButton("Change...")
-        btn_change_folder.setObjectName("SmallBtn")
-        btn_change_folder.clicked.connect(self.choose_output_folder)
-        settings_row.addWidget(btn_change_folder)
-
-        self.btn_reset_folder = QPushButton("Reset")
-        self.btn_reset_folder.setObjectName("SmallBtn")
-        self.btn_reset_folder.setVisible(False)
-        self.btn_reset_folder.clicked.connect(self.reset_output_folder)
-        settings_row.addWidget(self.btn_reset_folder)
 
         bottom_layout.addLayout(settings_row)
 
-        # Convert Action Row
+        # Row 2: Output folder
+        folder_row = QHBoxLayout()
+        folder_row.setSpacing(10)
+
+        lbl_save = QLabel("Save to:")
+        lbl_save.setObjectName("SubtleLabel")
+        folder_row.addWidget(lbl_save)
+
+        self.lbl_output_path = QLabel("Same folder as original files")
+        self.lbl_output_path.setObjectName("FolderBadge")
+        self.lbl_output_path.setMaximumWidth(420)
+        folder_row.addWidget(self.lbl_output_path)
+
+        btn_change_folder = QPushButton("Change...")
+        btn_change_folder.setObjectName("SmallBtn")
+        btn_change_folder.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_change_folder.clicked.connect(self.choose_output_folder)
+        folder_row.addWidget(btn_change_folder)
+
+        self.btn_reset_folder = QPushButton("Reset")
+        self.btn_reset_folder.setObjectName("SmallBtn")
+        self.btn_reset_folder.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset_folder.setVisible(False)
+        self.btn_reset_folder.clicked.connect(self.reset_output_folder)
+        folder_row.addWidget(self.btn_reset_folder)
+        folder_row.addStretch()
+
+        bottom_layout.addLayout(folder_row)
+
+        # Divider
+        divider = QFrame()
+        divider.setObjectName("Divider")
+        divider.setFixedHeight(1)
+        bottom_layout.addWidget(divider)
+
+        # Row 3: Progress + actions
         action_row = QHBoxLayout()
         action_row.setSpacing(12)
 
         self.progress = QProgressBar()
         self.progress.setValue(0)
         self.progress.setFormat("Ready")
+        self.progress.setFixedHeight(42)
         action_row.addWidget(self.progress, stretch=1)
 
         self.btn_open_folder = QPushButton("Open Output Folder")
         self.btn_open_folder.setObjectName("AddSecondaryBtn")
+        self.btn_open_folder.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_open_folder.setFixedHeight(42)
         self.btn_open_folder.clicked.connect(self.open_output_folder)
         action_row.addWidget(self.btn_open_folder)
 
@@ -320,20 +346,76 @@ class OmniConvertApp(QMainWindow):
         self.btn_convert.setObjectName("ConvertBtn")
         self.btn_convert.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_convert.setMinimumWidth(200)
-        self.btn_convert.setMinimumHeight(42)
+        self.btn_convert.setFixedHeight(42)
         self.btn_convert.clicked.connect(self.toggle_conversion)
         action_row.addWidget(self.btn_convert)
 
         bottom_layout.addLayout(action_row)
         layout.addWidget(bottom_card)
 
+    @staticmethod
+    def _icon_paths() -> Dict[str, str]:
+        """Write tiny SVG icons used by the stylesheet to a temp folder."""
+        import tempfile
+        icon_dir = Path(tempfile.gettempdir()) / "file_converter_icons"
+        icon_dir.mkdir(parents=True, exist_ok=True)
+        icons = {
+            "check.svg": (
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+                '<path d="M3.5 8.5l3 3 6-7" fill="none" stroke="#ffffff" '
+                'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+            ),
+            "arrow.svg": (
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12">'
+                '<path d="M2.5 4.5l3.5 3.5 3.5-3.5" fill="none" stroke="#475569" '
+                'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+            ),
+        }
+        paths = {}
+        for name, svg in icons.items():
+            p = icon_dir / name
+            try:
+                p.write_text(svg, encoding="utf-8")
+            except Exception:
+                pass
+            paths[name] = p.as_posix()
+        return paths
+
     def _apply_stylesheet(self):
+        icons = self._icon_paths()
         self.setStyleSheet("""
-            QMainWindow, QWidget {
+            QMainWindow, QWidget#Central {
                 background-color: #f8fafc;
+            }
+            QWidget {
                 color: #1e293b;
                 font-family: 'Segoe UI', system-ui, sans-serif;
                 font-size: 13px;
+            }
+            QLabel, QCheckBox {
+                background: transparent;
+            }
+            QCheckBox {
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1.5px solid #94a3b8;
+                border-radius: 4px;
+                background: #ffffff;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #2563eb;
+            }
+            QCheckBox::indicator:checked {
+                background: #2563eb;
+                border-color: #2563eb;
+                image: url(__CHECK_SVG__);
+            }
+            #Divider {
+                background-color: #e2e8f0;
+                border: none;
             }
             #DropZone {
                 background-color: #ffffff;
@@ -437,6 +519,7 @@ class OmniConvertApp(QMainWindow):
                 border-bottom: 1px solid #e2e8f0;
             }
             QComboBox {
+                combobox-popup: 0;
                 background-color: #ffffff;
                 color: #0f172a;
                 border: 1px solid #cbd5e1;
@@ -446,6 +529,65 @@ class OmniConvertApp(QMainWindow):
             }
             QComboBox:hover {
                 border-color: #2563eb;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                width: 26px;
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: url(__ARROW_SVG__);
+                width: 12px;
+                height: 12px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #ffffff;
+                color: #0f172a;
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                padding: 4px;
+                outline: none;
+                selection-background-color: #dbeafe;
+                selection-color: #1e3a8a;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 28px;
+                padding: 2px 8px;
+                color: #0f172a;
+            }
+            QComboBox QAbstractItemView::item:hover,
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #dbeafe;
+                color: #1e3a8a;
+            }
+            QToolTip {
+                background-color: #0f172a;
+                color: #ffffff;
+                border: none;
+                padding: 4px 8px;
+            }
+            QComboBox QAbstractItemView QScrollBar:vertical {
+                background: #f8fafc;
+                width: 10px;
+                margin: 2px;
+                border: none;
+            }
+            QComboBox QAbstractItemView QScrollBar::handle:vertical {
+                background: #cbd5e1;
+                border-radius: 3px;
+                min-height: 24px;
+            }
+            QComboBox QAbstractItemView QScrollBar::handle:vertical:hover {
+                background: #94a3b8;
+            }
+            QComboBox QAbstractItemView QScrollBar::add-line:vertical,
+            QComboBox QAbstractItemView QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QComboBox QAbstractItemView QScrollBar::add-page:vertical,
+            QComboBox QAbstractItemView QScrollBar::sub-page:vertical {
+                background: none;
             }
             QProgressBar {
                 background-color: #f1f5f9;
@@ -460,7 +602,8 @@ class OmniConvertApp(QMainWindow):
                 background-color: #2563eb;
                 border-radius: 6px;
             }
-        """)
+        """.replace("__CHECK_SVG__", icons["check.svg"])
+           .replace("__ARROW_SVG__", icons["arrow.svg"]))
 
     # =========================================================================
     # ACTIONS
@@ -475,8 +618,9 @@ class OmniConvertApp(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Choose Output Folder")
         if folder:
             self.custom_output_dir = folder
-            short_name = Path(folder).name or folder
-            self.lbl_output_path.setText(f"Folder: {short_name}")
+            fm = self.lbl_output_path.fontMetrics()
+            shown = fm.elidedText(folder, Qt.TextElideMode.ElideMiddle, 390)
+            self.lbl_output_path.setText(shown)
             self.lbl_output_path.setToolTip(folder)
             self.btn_reset_folder.setVisible(True)
 
@@ -598,7 +742,7 @@ class OmniConvertApp(QMainWindow):
     # CONVERSION START / STOP
     # =========================================================================
     def toggle_conversion(self):
-        if self.worker and self.worker.isRunning():
+        if self._converting and self.worker:
             self.worker.cancel()
             self.btn_convert.setEnabled(False)
             self.btn_convert.setText("Stopping...")
@@ -637,6 +781,12 @@ class OmniConvertApp(QMainWindow):
         self.worker.item_finished.connect(self._on_item_finished)
         self.worker.progress_updated.connect(self._on_progress_updated)
         self.worker.batch_completed.connect(self._on_batch_completed)
+        # Keep a reference until the thread fully exits (Office shutdown may
+        # continue in the background after the UI has been reset).
+        worker = self.worker
+        self._all_workers.append(worker)
+        worker.finished.connect(lambda w=worker: self._all_workers.remove(w) if w in self._all_workers else None)
+        self._converting = True
         self.worker.start()
 
     def _on_item_started(self, row: int, text: str):
@@ -659,6 +809,7 @@ class OmniConvertApp(QMainWindow):
         self.progress.setValue(current)
 
     def _on_batch_completed(self, success_count: int, fail_count: int, elapsed: float):
+        self._converting = False
         self.btn_convert.setEnabled(True)
         self.btn_convert.setText("Step 3: Convert Files")
         self.btn_convert.setProperty("stopping", False)
@@ -671,9 +822,38 @@ class OmniConvertApp(QMainWindow):
             self.progress.setFormat(f"Finished: {success_count} done, {fail_count} failed")
 
 
+def _force_light_theme(app: QApplication):
+    """Use a consistent light look even when Windows is in dark mode."""
+    from PyQt6.QtGui import QPalette
+    app.setStyle("Fusion")
+    try:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    except Exception:
+        pass
+    pal = QPalette()
+    roles = {
+        QPalette.ColorRole.Window: "#f8fafc",
+        QPalette.ColorRole.WindowText: "#1e293b",
+        QPalette.ColorRole.Base: "#ffffff",
+        QPalette.ColorRole.AlternateBase: "#f8fafc",
+        QPalette.ColorRole.Text: "#0f172a",
+        QPalette.ColorRole.Button: "#f1f5f9",
+        QPalette.ColorRole.ButtonText: "#1e293b",
+        QPalette.ColorRole.Highlight: "#dbeafe",
+        QPalette.ColorRole.HighlightedText: "#1e3a8a",
+        QPalette.ColorRole.ToolTipBase: "#0f172a",
+        QPalette.ColorRole.ToolTipText: "#ffffff",
+        QPalette.ColorRole.PlaceholderText: "#94a3b8",
+    }
+    for role, color in roles.items():
+        pal.setColor(role, QColor(color))
+    app.setPalette(pal)
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("File Converter")
+    _force_light_theme(app)
     window = OmniConvertApp()
     window.show()
     sys.exit(app.exec())
