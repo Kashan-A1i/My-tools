@@ -87,6 +87,7 @@ class ScreenCapturer:
         self.cfg = capture_cfg
         self.differ = ScreenDiffer(threshold=capture_cfg.get("diff_threshold", 0.035))
         self.max_dim = int(capture_cfg.get("max_image_dimension", 1280))
+        self.jpeg_quality = int(capture_cfg.get("jpeg_quality", 80))
 
     def _resolve_target_region(self, sct_monitors: list) -> Dict[str, int]:
         mode = str(self.cfg.get("mode", "active_window")).lower()
@@ -166,18 +167,21 @@ class ScreenCapturer:
                 except OSError:
                     return None
 
-        changed, diff_score, dhash = self.differ.has_changed(img, force=force)
-        if not changed:
-            return None
+        if force:
+            changed, diff_score, dhash = True, 1.0, 0
+        else:
+            changed, diff_score, dhash = self.differ.has_changed(img, force=False)
+            if not changed:
+                return None
 
-        # Downscale large Retina/4K captures for faster OCR & lower API payload size
+        # Downscale large Retina/4K captures for faster encoding & smaller API payload
         if max(img.width, img.height) > self.max_dim:
             scale = self.max_dim / float(max(img.width, img.height))
             new_size = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
-            img = img.resize(new_size, Image.Resampling.LANCZOS)
+            img = img.resize(new_size, Image.Resampling.BILINEAR)
 
         buf = io.BytesIO()
-        img.save(buf, format="PNG", optimize=True)
+        img.convert("RGB").save(buf, format="JPEG", quality=self.jpeg_quality)
         return CapturedFrame(
             image=img,
             png_bytes=buf.getvalue(),

@@ -2,23 +2,21 @@
   "llm": {
     "provider": "gemini",
     "gemini_api_key": "",
-    "gemini_model": "gemini-3.6-flash",
+    "gemini_model": "gemini-3.5-flash-lite",
     "gemini_fallback_models": [
-      "gemini-3.5-flash-lite",
       "gemini-flash-lite-latest",
       "gemini-3.1-flash-lite",
-      "gemini-3.7-flash",
       "gemini-3.5-flash",
       "gemini-flash-latest"
     ],
     "openai_api_key": "",
     "openai_model": "gpt-4o-mini",
-    "max_tokens": 400,
+    "max_tokens": 240,
     "temperature": 0.1,
-    "timeout_seconds": 15.0
+    "timeout_seconds": 6.0
   },
   "ocr": {
-    "engine": "rapidocr",
+    "engine": "vision",
     "tesseract_cmd": "tesseract",
     "min_question_length": 6,
     "require_question_pattern": false
@@ -31,16 +29,17 @@
       "width": 1200,
       "height": 800
     },
-    "max_image_dimension": 1440
+    "max_image_dimension": 1280,
+    "jpeg_quality": 80
   },
   "trigger": {
     "mode": "hot_corner",
     "capture_corner": "bottom_left",
     "toggle_corner": "top_left",
-    "dwell_seconds": 1.2,
+    "dwell_seconds": 0.7,
     "corner_size_px": 28,
     "poll_interval_ms": 80,
-    "cooldown_seconds": 2.5
+    "cooldown_seconds": 2.0
   },
   "overlay": {
     "width": 260,
@@ -48,9 +47,13 @@
     "max_height": 240,
     "offset_x": 18,
     "offset_y": 14,
-    "idle_opacity": 0.45,
+    "idle_opacity": 0.0,
     "active_opacity": 0.85,
-    "idle_timeout_seconds": 12.0,
+    "idle_timeout_seconds": 4.0,
+    "per_line_timeout_seconds": 1.0,
+    "max_timeout_seconds": 8.0,
+    "hover_peek_enabled": true,
+    "hover_peek_margin_px": 14,
     "fade_duration_ms": 180,
     "exclude_from_capture": true,
     "text_color": "#F3F4F6",

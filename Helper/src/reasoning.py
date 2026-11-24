@@ -185,12 +185,21 @@ class ReasoningEngine:
                 error=str(exc),
             )
 
+    @staticmethod
+    def _detect_image_mime(image_bytes: bytes) -> str:
+        if image_bytes.startswith(b"\x89PNG"):
+            return "image/png"
+        if image_bytes.startswith(b"\xff\xd8"):
+            return "image/jpeg"
+        return "image/png"
+
     def _call_gemini_with_failover(
         self, payload: QuestionPayload, png_bytes: Optional[bytes]
     ) -> tuple[str, str]:
         api_key = str(self.cfg.get("gemini_api_key", "")).strip()
-        timeout = float(self.cfg.get("timeout_seconds", 10.0))
+        timeout = float(self.cfg.get("timeout_seconds", 6.0))
         models = self._get_gemini_model_chain()
+        mime_type = self._detect_image_mime(png_bytes) if png_bytes else "image/jpeg"
 
         parts = []
         if payload.question_type == "vision_direct" and png_bytes:
@@ -206,7 +215,7 @@ class ReasoningEngine:
             parts.append(
                 {
                     "inline_data": {
-                        "mime_type": "image/png",
+                        "mime_type": mime_type,
                         "data": base64.b64encode(png_bytes).decode("ascii"),
                     }
                 }
@@ -218,7 +227,7 @@ class ReasoningEngine:
                 parts.append(
                     {
                         "inline_data": {
-                            "mime_type": "image/png",
+                            "mime_type": mime_type,
                             "data": base64.b64encode(png_bytes).decode("ascii"),
                         }
                     }
@@ -334,11 +343,12 @@ class ReasoningEngine:
                 if payload.question_type == "vision_direct"
                 else payload.to_prompt_text()
             )
+            mime_type = self._detect_image_mime(png_bytes)
             user_content = [
                 {"type": "text", "text": prompt_text},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{b64_img}", "detail": "low"},
+                    "image_url": {"url": f"data:{mime_type};base64,{b64_img}", "detail": "low"},
                 },
             ]
         else:

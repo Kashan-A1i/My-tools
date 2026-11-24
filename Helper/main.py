@@ -292,7 +292,7 @@ def main() -> int:
     if not worker.reasoning.is_configured():
         hud.update_lines(["Set API key in config.json"])
     else:
-        hud.update_lines([])
+        hud.clear()
 
     return app.exec()
 
