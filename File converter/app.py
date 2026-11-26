@@ -27,6 +27,9 @@ from converter_engine import (
     ConversionEngine, ALL_INPUT_EXTENSIONS, ALL_TARGET_FORMATS, can_convert
 )
 
+# Item data role on the Status cell: settings signature of a successful conversion
+CONVERTED_ROLE = Qt.ItemDataRole.UserRole + 1
+
 
 def format_size(size_bytes: int) -> str:
     if size_bytes < 1024:
@@ -200,6 +203,7 @@ class OmniConvertApp(QMainWindow):
         self.worker: Optional[BatchConversionWorker] = None
         self._all_workers: List[BatchConversionWorker] = []
         self._converting = False
+        self._active_signature = ""
         self.file_records: Dict[str, str] = {}
         self.custom_output_dir: str = ""
 
@@ -285,6 +289,7 @@ class OmniConvertApp(QMainWindow):
         settings_row.addSpacing(8)
         self.chk_merge = QCheckBox("Combine into one PDF")
         self.chk_merge.setToolTip("Merge all files in the list into a single PDF file")
+        self.chk_merge.toggled.connect(lambda _: self._refresh_convert_button())
         settings_row.addWidget(self.chk_merge)
         settings_row.addStretch()
 
@@ -498,8 +503,15 @@ class OmniConvertApp(QMainWindow):
             QPushButton#ConvertBtn:hover {
                 background-color: #15803d;
             }
+            QPushButton#ConvertBtn:disabled {
+                background-color: #dcfce7;
+                color: #15803d;
+                border: 1px solid #86efac;
+            }
             QPushButton#ConvertBtn[stopping="true"] {
                 background-color: #dc2626;
+                color: #ffffff;
+                border: none;
             }
             QTableWidget {
                 background-color: #ffffff;
@@ -613,6 +625,7 @@ class OmniConvertApp(QMainWindow):
         self.chk_merge.setVisible(is_pdf)
         if not is_pdf:
             self.chk_merge.setChecked(False)
+        self._refresh_convert_button()
 
     def choose_output_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose Output Folder")
@@ -623,12 +636,14 @@ class OmniConvertApp(QMainWindow):
             self.lbl_output_path.setText(shown)
             self.lbl_output_path.setToolTip(folder)
             self.btn_reset_folder.setVisible(True)
+            self._refresh_convert_button()
 
     def reset_output_folder(self):
         self.custom_output_dir = ""
         self.lbl_output_path.setText("Same folder as original files")
         self.lbl_output_path.setToolTip("")
         self.btn_reset_folder.setVisible(False)
+        self._refresh_convert_button()
 
     def open_output_folder(self):
         if self.custom_output_dir and os.path.isdir(self.custom_output_dir):
@@ -729,6 +744,7 @@ class OmniConvertApp(QMainWindow):
     def _update_count(self):
         n = self.table.rowCount()
         self.lbl_count.setText(f"{n} file{'s' if n != 1 else ''} selected")
+        self._refresh_convert_button()
 
     def _on_row_double_click(self, index):
         row = index.row()
@@ -757,12 +773,22 @@ class OmniConvertApp(QMainWindow):
         merge_pdf = self.chk_merge.isChecked() and target_ext == "pdf"
         output_dir = self.custom_output_dir if self.custom_output_dir else None
 
+        pending = self._pending_rows()
+        if not pending:
+            self._refresh_convert_button()
+            return
+
+        # Merging needs every file in the list, so re-run all of them.
+        rows_to_run = list(range(row_count)) if merge_pdf else pending
         items = [
             {"row": r, "path": self.table.item(r, 0).data(Qt.ItemDataRole.UserRole)}
-            for r in range(row_count)
+            for r in rows_to_run
         ]
+        self._active_signature = self._current_signature()
+        for r in rows_to_run:
+            self.table.item(r, 3).setData(CONVERTED_ROLE, None)
 
-        self.progress.setMaximum(row_count)
+        self.progress.setMaximum(len(items))
         self.progress.setValue(0)
         self.progress.setFormat("Converting %v of %m (%p%)")
 
@@ -787,6 +813,7 @@ class OmniConvertApp(QMainWindow):
         self._all_workers.append(worker)
         worker.finished.connect(lambda w=worker: self._all_workers.remove(w) if w in self._all_workers else None)
         self._converting = True
+        self._set_list_editing_enabled(False)
         self.worker.start()
 
     def _on_item_started(self, row: int, text: str):
@@ -803,6 +830,8 @@ class OmniConvertApp(QMainWindow):
             if success and out_path:
                 it.setData(Qt.ItemDataRole.UserRole, out_path)
                 it.setToolTip(f"Double-click to open: {out_path}")
+            # Remember the settings this file was successfully converted with.
+            it.setData(CONVERTED_ROLE, self._active_signature if success else None)
 
     def _on_progress_updated(self, current: int, total: int):
         self.progress.setMaximum(total)
@@ -810,16 +839,60 @@ class OmniConvertApp(QMainWindow):
 
     def _on_batch_completed(self, success_count: int, fail_count: int, elapsed: float):
         self._converting = False
-        self.btn_convert.setEnabled(True)
-        self.btn_convert.setText("Step 3: Convert Files")
+        self._set_list_editing_enabled(True)
         self.btn_convert.setProperty("stopping", False)
         self.btn_convert.style().unpolish(self.btn_convert)
         self.btn_convert.style().polish(self.btn_convert)
+        self._refresh_convert_button()
 
         if fail_count == 0:
             self.progress.setFormat(f"✓ Completed {success_count} file(s) in {elapsed:.1f}s")
         else:
             self.progress.setFormat(f"Finished: {success_count} done, {fail_count} failed")
+
+    # =========================================================================
+    # CONVERTED-FILE TRACKING
+    # =========================================================================
+    def _current_signature(self) -> str:
+        """Settings that determine a file's output. Changing any of them
+        means already-converted files need converting again."""
+        target_ext = self.cmb_target.currentData() or ""
+        merge = self.chk_merge.isChecked() and target_ext == "pdf"
+        return f"{target_ext}|{int(merge)}|{self.custom_output_dir}"
+
+    def _pending_rows(self) -> List[int]:
+        sig = self._current_signature()
+        return [
+            r for r in range(self.table.rowCount())
+            if self.table.item(r, 3).data(CONVERTED_ROLE) != sig
+        ]
+
+    def _refresh_convert_button(self):
+        if self._converting:
+            return
+        total = self.table.rowCount()
+        pending = len(self._pending_rows())
+        done = total - pending
+
+        if total == 0 or done == 0:
+            text, enabled = "Step 3: Convert Files", True
+        elif pending == 0:
+            text, enabled = "✓ All Files Converted", False
+        else:
+            text, enabled = f"Convert {pending} New File{'s' if pending != 1 else ''}", True
+
+        self.btn_convert.setText(text)
+        self.btn_convert.setEnabled(enabled)
+        self.btn_convert.setToolTip(
+            "Add new files, or change the format / output folder, to convert again"
+            if not enabled else ""
+        )
+
+    def _set_list_editing_enabled(self, enabled: bool):
+        """Prevent the list from changing while a conversion is running."""
+        for w in (self.btn_remove, self.btn_clear, self.cmb_target,
+                  self.chk_merge, self.drop_zone):
+            w.setEnabled(enabled)
 
 
 def _force_light_theme(app: QApplication):
